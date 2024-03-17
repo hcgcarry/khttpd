@@ -31,11 +31,13 @@
     "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
+#define SEND_BUFFER_SIZE 256
 
 struct http_request {
     struct socket *socket;
     enum http_method method;
     char request_url[128];
+    struct dir_context dir_context;
     int complete;
 };
 
@@ -72,18 +74,121 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
     }
     return done;
 }
+static int tracedir(struct dir_context *dir_context,
+                    const char *name,
+                    int namelen,
+                    loff_t offset,
+                    u64 ino,
+                    unsigned int d_type)
+{
+    // if (strcmp(name, ".") ==0 ||  strcmp(name, "..") ==0) return 0 ;
+
+    struct http_request *request =
+        container_of(dir_context, struct http_request, dir_context);
+    char buf[SEND_BUFFER_SIZE] = {0};
+    char file_path[1024] = {0};
+    snprintf(file_path,1024 ,"%s/%s",request->request_url,name);
+    snprintf(buf, SEND_BUFFER_SIZE,
+                "<tr><td><a href=\"%s\">%s</a></td></tr>\r\n", file_path, name);
+    http_server_send(request->socket, buf, strlen(buf));
+    return 0;
+}
+
+static void handle_dir(struct http_request* request,struct file* fp){
+    printk("----handle_dir");
+
+
+    char buf[SEND_BUFFER_SIZE] = {"<table>\r\n"};
+
+    snprintf(buf, SEND_BUFFER_SIZE, "HTTP/1.1 200 OK\r\n%s%s%s",
+             "Connection: Keep-Alive\r\n", "Content-Type: text/html\r\n",
+             "Keep-Alive: timeout=5, max=1000\r\n\r\n");
+    http_server_send(request->socket, buf, strlen(buf));
+
+
+    snprintf(buf, SEND_BUFFER_SIZE, "%s%s%s%s", "<html><head><style>\r\n",
+             "body{font-family: monospace; font-size: 15px;}\r\n",
+             "td {padding: 1.5px 6px;}\r\n",
+             "</style></head><body><table>\r\n");
+    http_server_send(request->socket, buf, strlen(buf));
+
+
+    iterate_dir(fp, &request->dir_context);
+    snprintf(buf, SEND_BUFFER_SIZE, "</table></body></html>\r\n");
+
+    http_server_send(request->socket, buf, strlen(buf));
+}
+
+static void handle_file(struct http_request* request,struct file* fp){
+    printk("----handle_file");
+
+    char header[SEND_BUFFER_SIZE] = {0};
+    char *buf = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
+
+    int len = kernel_read(fp, buf, fp->f_inode->i_size, 0);
+    printk("i_size % d\n",fp->f_inode->i_size," len ",len);
+
+    
+    snprintf(header, SEND_BUFFER_SIZE, "HTTP/1.1 200 OK\r\n%s%s%s",
+            "Connection: Keep-Alive\r\n", "Content-Type: text/plain\r\n",
+            "Keep-Alive: timeout=5, max=1000\r\n\r\n");
+
+    http_server_send(request->socket, header, strlen(header));
+
+    http_server_send(request->socket, buf, strlen(buf));
+
+    kfree(buf);
+
+
+}
+
+static bool send_dir_file_content(struct http_request *request)
+{
+    struct file *fp;
+    char buf[SEND_BUFFER_SIZE] = {0};
+
+    request->dir_context.actor = tracedir;
+ 
+
+
+
+    //char* file_name = request->request_url;
+
+    char file_path[1024] = "/home/jimmy/khttpd_project/";
+    strcat(file_path,request->request_url);
+
+    printk(KERN_INFO "file_name: %s \n", file_path);
+
+
+    fp = filp_open(file_path, O_RDONLY, 0);
+    if (IS_ERR(fp)) {
+        pr_info("Open file failed");
+        return false;
+    }
+
+    printk("i_mode: %d\n",fp->f_inode->i_mode);
+    if(S_ISDIR(fp->f_inode->i_mode)){
+        handle_dir(request,fp);
+    }
+    else if (S_ISREG(fp->f_inode->i_mode)) {
+        handle_file(request,fp);
+    }
+
+
+    filp_close(fp, NULL);
+    return true;
+}
 
 static int http_server_response(struct http_request *request, int keep_alive)
 {
     char *response;
-
     pr_info("requested_url = %s\n", request->request_url);
-    if (request->method != HTTP_GET)
-        response = keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501;
-    else
-        response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
-                              : HTTP_RESPONSE_200_DUMMY;
-    http_server_send(request->socket, response, strlen(response));
+
+
+
+    send_dir_file_content(request);
+
+   
     return 0;
 }
 
@@ -133,6 +238,8 @@ static int http_parser_callback_body(http_parser *parser,
     return 0;
 }
 
+
+
 static int http_parser_callback_message_complete(http_parser *parser)
 {
     struct http_request *request = parser->data;
@@ -168,6 +275,7 @@ static int http_server_worker(void *arg)
     request.socket = socket;
     http_parser_init(&parser, HTTP_REQUEST);
     parser.data = &request;
+
     while (!kthread_should_stop()) {
         int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         if (ret <= 0) {
