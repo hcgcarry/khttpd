@@ -1,4 +1,3 @@
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
@@ -6,6 +5,7 @@
 
 #include "http_parser.h"
 #include "http_server.h"
+#include "content_cache_table.h"
 
 #define CRLF "\r\n"
 
@@ -31,14 +31,16 @@
     "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
-#define SEND_BUFFER_SIZE 256
+#define SEND_BUFFER_SIZE 4096
+
+struct content_cache_table cache_table;
 
 struct http_request {
     struct socket *socket;
     enum http_method method;
     char request_url[128];
-    struct dir_context dir_context;
     int complete;
+    struct dir_context dir;
 };
 
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
@@ -74,31 +76,66 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
     }
     return done;
 }
-static int tracedir(struct dir_context *dir_context,
+
+
+// static int tracedir(struct dir_context *dir,
+//                     const char *name,
+//                     int namelen,
+//                     loff_t offset,
+//                     u64 ino,
+//                     unsigned int d_type)
+// {
+//     if (strcmp(name, ".") && strcmp(name, "..")) {
+//         struct http_request *request =
+//             container_of(dir, struct http_request, dir);
+//         char buf[SEND_BUFFER_SIZE] = {0};
+
+//         snprintf(buf, SEND_BUFFER_SIZE,
+//                  "<tr><td><a href=\"%s\">%s</a></td></tr>\r\n", name, name);
+//         http_server_send(request->socket, buf, strlen(buf));
+//     }
+//     return 0;
+// }
+
+
+
+static int tracedir(struct dir_context *dir,
                     const char *name,
                     int namelen,
                     loff_t offset,
                     u64 ino,
                     unsigned int d_type)
 {
-    // if (strcmp(name, ".") ==0 ||  strcmp(name, "..") ==0) return 0 ;
 
     struct http_request *request =
-        container_of(dir_context, struct http_request, dir_context);
+        container_of(dir, struct http_request, dir);
     char buf[SEND_BUFFER_SIZE] = {0};
     char file_path[1024] = {0};
-    snprintf(file_path,1024 ,"%s/%s",request->request_url,name);
+    if(strcmp(request->request_url,"/") == 0){
+        snprintf(file_path,1024 ,"/%s",name);
+    }
+    else{
+        snprintf(file_path,1024 ,"%s/%s",request->request_url,name);
+    }
+
+    // char* file_path_ptr = file_path;
+    // if(file_path[0] == '/'){
+    //     file_path_ptr = file_path+1;
+    // }
     snprintf(buf, SEND_BUFFER_SIZE,
                 "<tr><td><a href=\"%s\">%s</a></td></tr>\r\n", file_path, name);
     http_server_send(request->socket, buf, strlen(buf));
     return 0;
 }
 
-static void handle_dir(struct http_request* request,struct file* fp){
+static void handle_dir(struct http_request *request, struct file *fp,struct cache_element* element)
+{
     printk("----handle_dir");
 
 
-    char buf[SEND_BUFFER_SIZE] = {"<table>\r\n"};
+
+    char buf[SEND_BUFFER_SIZE] = {0};
+    
 
     snprintf(buf, SEND_BUFFER_SIZE, "HTTP/1.1 200 OK\r\n%s%s%s",
              "Connection: Keep-Alive\r\n", "Content-Type: text/html\r\n",
@@ -110,85 +147,99 @@ static void handle_dir(struct http_request* request,struct file* fp){
              "body{font-family: monospace; font-size: 15px;}\r\n",
              "td {padding: 1.5px 6px;}\r\n",
              "</style></head><body><table>\r\n");
+
     http_server_send(request->socket, buf, strlen(buf));
 
 
-    iterate_dir(fp, &request->dir_context);
+    iterate_dir(fp, &request->dir);
+
     snprintf(buf, SEND_BUFFER_SIZE, "</table></body></html>\r\n");
 
-    http_server_send(request->socket, buf, strlen(buf));
-}
+    http_server_send(request->socket,buf,strlen(buf));
 
-static void handle_file(struct http_request* request,struct file* fp){
-    printk("----handle_file");
-
-    char header[SEND_BUFFER_SIZE] = {0};
-    char *buf = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
-
-    int len = kernel_read(fp, buf, fp->f_inode->i_size, 0);
-    printk("i_size % d\n",fp->f_inode->i_size," len ",len);
-
-    
-    snprintf(header, SEND_BUFFER_SIZE, "HTTP/1.1 200 OK\r\n%s%s%s",
-            "Connection: Keep-Alive\r\n", "Content-Type: text/plain\r\n",
-            "Keep-Alive: timeout=5, max=1000\r\n\r\n");
-
-    http_server_send(request->socket, header, strlen(header));
-
-    http_server_send(request->socket, buf, strlen(buf));
-
-    kfree(buf);
-
+    return;
 
 }
 
-static bool send_dir_file_content(struct http_request *request)
+static void handle_file(struct http_request *request, struct file *fp,struct cache_element* element)
 {
+
+    pr_info("----- handle_file");
+    int bufLen =  fp->f_inode->i_size + 4906;
+    // int bufLen =  20000;
+    char *buf = kmalloc(bufLen, GFP_KERNEL);
+
+    snprintf(buf, bufLen, "HTTP/1.1 200 OK\r\n%s%s%s%d%s",
+             "Connection: Keep-Alive\r\n", "Content-Type: text/plain\r\n",
+             "Content-Length: ",fp->f_inode->i_size,"\r\n\r\n");
+    http_server_send(request->socket,buf,strlen(buf));
+    int len = kernel_read(fp, buf + strlen(buf), fp->f_inode->i_size, 0);
+
+    element->content = buf;
+    element->content_len = bufLen;
+
+    http_server_send(request->socket,buf,strlen(buf));
+
+    return;
+}
+
+static void send_dir_file_content(struct http_request *request,struct cache_element* element)
+{
+    pr_info("--- send_dir_file_content");
     struct file *fp;
-    char buf[SEND_BUFFER_SIZE] = {0};
 
-    request->dir_context.actor = tracedir;
- 
+    request->dir.actor = tracedir;
+    // char* file_name = request->request_url;
 
-
-
-    //char* file_name = request->request_url;
-
-    char file_path[1024] = "/home/jimmy/khttpd_project/";
-    strcat(file_path,request->request_url);
+    char file_path[1024] = "/home/jimmy/khttpd_project";
+    strcat(file_path, request->request_url);
 
     printk(KERN_INFO "file_name: %s \n", file_path);
 
 
     fp = filp_open(file_path, O_RDONLY, 0);
+
     if (IS_ERR(fp)) {
         pr_info("Open file failed");
-        return false;
+        return;
     }
 
-    printk("i_mode: %d\n",fp->f_inode->i_mode);
-    if(S_ISDIR(fp->f_inode->i_mode)){
-        handle_dir(request,fp);
-    }
-    else if (S_ISREG(fp->f_inode->i_mode)) {
-        handle_file(request,fp);
-    }
+    char* content = NULL;
 
-
+    if (S_ISDIR(fp->f_inode->i_mode)) {
+        handle_dir(request, fp,element);
+    } else if (S_ISREG(fp->f_inode->i_mode)) {
+        handle_file(request, fp,element);
+    }
+    printk("---send_dir_file end");
     filp_close(fp, NULL);
-    return true;
+    return ;
 }
 
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    char *response;
-    pr_info("requested_url = %s\n", request->request_url);
+    pr_info("--- http_server_response requested_url = %s\n", request->request_url);
+    char* key = request->request_url;
 
+    char* content = cache_table.get_element(&cache_table,key);
 
+    if(content){
+        pr_info("--- have cache");
+        printk("---content:%s",content);
+        http_server_send(request->socket,content,strlen(content));
 
-    send_dir_file_content(request);
+    }
+    else{
+        pr_info("--- do not have cache");
+        
+        struct cache_element* element = cache_element_init(key);
+        send_dir_file_content(request,element);
+        printk("content:%s",element->content);
+        if(element->content_len != NULL){
+            cache_table.insert_element(&cache_table, element);
+        }
+    }
 
-   
     return 0;
 }
 
@@ -278,16 +329,19 @@ static int http_server_worker(void *arg)
 
     while (!kthread_should_stop()) {
         int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
+        printk("---http_server_recv");
         if (ret <= 0) {
             if (ret)
                 pr_err("recv error: %d\n", ret);
             break;
         }
         http_parser_execute(&parser, &setting, buf, ret);
+        printk("---http_server_exec");
         if (request.complete && !http_should_keep_alive(&parser))
             break;
         memset(buf, 0, RECV_BUFFER_SIZE);
     }
+    printk("--- kernel_sock_shutdown");
     kernel_sock_shutdown(socket, SHUT_RDWR);
     sock_release(socket);
     kfree(buf);
@@ -299,6 +353,7 @@ int http_server_daemon(void *arg)
     struct socket *socket;
     struct task_struct *worker;
     struct http_server_param *param = (struct http_server_param *) arg;
+    content_cache_table_init(&cache_table);
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);

@@ -7,15 +7,16 @@ obj-m += khttpd.o
 khttpd-objs := \
 	http_parser.o \
 	http_server.o \
+	content_cache_table.o \
 	main.o
 
-GIT_HOOKS := .git/hooks/applied
-all: $(GIT_HOOKS) http_parser.c htstress
+# GIT_HOOKS := .git/hooks/applied
+all: http_parser.c htstress
 	make -C $(KDIR) M=$(PWD) modules
 
-$(GIT_HOOKS):
-	@scripts/install-git-hooks
-	@echo
+# $(GIT_HOOKS):
+# 	@scripts/install-git-hooks
+# 	@echo
 
 htstress: htstress.c
 	$(CC) $(CFLAGS_user) -o $@ $< $(LDFLAGS_user)
