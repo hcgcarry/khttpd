@@ -6,6 +6,7 @@
 #include "http_parser.h"
 #include "http_server.h"
 #include "content_cache_table.h"
+#include "heap.h"
 
 #define CRLF "\r\n"
 
@@ -34,6 +35,10 @@
 #define SEND_BUFFER_SIZE 4096
 
 struct content_cache_table cache_table;
+struct heap cache_heap;
+
+atomic_t current_msec;
+
 
 struct http_request {
     struct socket *socket;
@@ -225,7 +230,6 @@ static int http_server_response(struct http_request *request, int keep_alive)
 
     if(content){
         pr_info("--- have cache");
-        printk("---content:%s",content);
         http_server_send(request->socket,content,strlen(content));
 
     }
@@ -234,9 +238,12 @@ static int http_server_response(struct http_request *request, int keep_alive)
         
         struct cache_element* element = cache_element_init(key);
         send_dir_file_content(request,element);
-        printk("content:%s",element->content);
         if(element->content_len != NULL){
+            timer_update_current_msec();
+            int expire_time = atomic_read(&current_msec) + 2000;
+            element->expire_time.time = expire_time;
             cache_table.insert_element(&cache_table, element);
+            cache_heap.heap_insert_element(&cache_heap,element);
         }
     }
 
@@ -354,9 +361,12 @@ int http_server_daemon(void *arg)
     struct task_struct *worker;
     struct http_server_param *param = (struct http_server_param *) arg;
     content_cache_table_init(&cache_table);
+    heap_init(&cache_heap);
 
     allow_signal(SIGKILL);
     allow_signal(SIGTERM);
+
+    worker = kthread_run(delete_timer_cache_deamon, (void*)0,KBUILD_MODNAME );
 
     while (!kthread_should_stop()) {
         int err = kernel_accept(param->listen_socket, &socket, 0);

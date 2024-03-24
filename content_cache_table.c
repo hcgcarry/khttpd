@@ -38,8 +38,30 @@ struct cache_element* cache_element_init(char*key){
 }
 
 
+void free_hash_element_rcu(struct rcu_head *rcu)
+{
+    printk("---- free_hash_element_rcu");
+    struct cache_element *elem = container_of(rcu, struct cache_element, rcu);
+    kfree(elem->key);
+    kfree(elem->content);
+    kfree(elem);
+    return;
+}
+
+
+
+void delete_element(struct content_cache_table* this,struct cache_element* element){
+    printk("---- content_cache_table delete element");
+    spin_lock(&this->lock);
+    list_del_rcu(&element->list);
+    call_rcu(&element->rcu, free_hash_element_rcu);
+    spin_unlock(&this->lock);
+}
+
+
 void insert_element(struct content_cache_table* this,struct cache_element* element){
     printk("----insert_element ");
+    printk("element %d",element->expire_time.time);
     spin_lock(&this->lock);
     struct list_head* buckets = getBuckets(this,element->key);
     list_add(&element->list,buckets);
@@ -56,9 +78,6 @@ char* get_element(struct content_cache_table* this,char* key){
     list_for_each_entry_rcu(cur_element,buckets,list){
         if(strcmp(cur_element->key,key) == 0){
             printk("match key");
-            printk("content_len %d",cur_element->content_len);
-            printk("strlen content_len %d",strlen(cur_element->content));
-            printk("content %s",cur_element->content);
             content = (char*)kmalloc(cur_element->content_len + 1,GFP_KERNEL);
             strcpy(content,cur_element->content);
             break;
@@ -67,6 +86,7 @@ char* get_element(struct content_cache_table* this,char* key){
     rcu_read_unlock();
     return content;
 }
+
 
 
 

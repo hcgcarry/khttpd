@@ -12,12 +12,19 @@
 
 #define CONTENT_CACHE_TABLE_SIZE 1024
 
+struct expire{
+    int time;
+};
+
+
 struct cache_element{
     char *key;
     struct list_head list;
     char* content;
     int content_len;
     struct dir_context dir;
+    struct expire expire_time;
+    struct rcu_head rcu;
 };
 
 
@@ -28,6 +35,7 @@ struct content_cache_table{
     struct list_head* (*getBuckets)(struct content_cache_table* ,char*);
     void (*insert_element)(struct content_cache_table* ,struct cache_element* );
     char* (*get_element)(struct content_cache_table* ,char*);
+    void (*delete_element)(struct content_cache_table* ,struct cache_element* );
 
 };
 
