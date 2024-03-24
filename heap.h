@@ -23,6 +23,7 @@ struct heap{
     struct expire* (*heap_delete_expire_element)(struct heap* );
     void (*heap_insert_element)(struct heap* ,struct cache_element* );
     void (*heap_init)(struct heap*);
+    void (*heap_print)(struct heap*);
 };
 
 

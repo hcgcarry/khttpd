@@ -94,6 +94,7 @@ char* get_element(struct content_cache_table* this,char* key){
 void content_cache_table_init(struct content_cache_table* this){
     int i = 0;
     this->get_element = get_element;
+    this->delete_element= delete_element;
     this->getBuckets = getBuckets;
     this->insert_element = insert_element;
     for(i=0;i<CONTENT_CACHE_TABLE_SIZE;i++){
